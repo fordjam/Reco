@@ -1,7 +1,7 @@
-file1_column,file2_column,is_key_column
-customer_id,cust_id,True
-transaction_date,trans_date,False
-amount,transaction_amount,False
-description,transaction_description,False
-status,transaction_status,False
-category,transaction_category,False
+file1_column,file2_column,is_key_column,use_for_aggregation,aggregation_function
+customer_id,cust_id,True,True,
+transaction_date,trans_date,False,True,
+amount,transaction_amount,False,False,sum
+description,transaction_description,False,False,
+status,transaction_status,False,False,
+category,transaction_category,False,True,

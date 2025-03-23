@@ -2,9 +2,29 @@ import streamlit as st
 import pandas as pd
 import os
 import json
+import io
 from utils import perform_reconciliation
 
 st.set_page_config(page_title="CSV Reconciliation Tool", layout="wide")
+
+def load_default_preset():
+    """Load the default transaction mapping preset if it exists."""
+    preset_path = "presets/transaction_mapping_preset.csv"
+    if os.path.exists(preset_path):
+        with open(preset_path, 'r') as f:
+            preset_data = import_preset_from_csv(f)
+            st.session_state.mapping_presets["Default Transaction Mapping"] = preset_data
+            st.session_state.column_mappings = preset_data["column_mappings"]
+            st.session_state.key_columns = preset_data["key_columns"]
+            st.session_state.current_preset_name = "Default Transaction Mapping"
+            
+            # Apply aggregation settings if they exist
+            if "agg_columns" in preset_data:
+                st.session_state.agg_columns_file1 = preset_data["agg_columns"]
+            if "agg_functions" in preset_data:
+                st.session_state.agg_functions = preset_data["agg_functions"]
+            if "use_aggregation" in preset_data:
+                st.session_state.use_aggregation = preset_data["use_aggregation"]
 
 # Initialize session state variables if they don't exist
 if 'file1_data' not in st.session_state:
@@ -19,6 +39,7 @@ if 'reconciliation_results' not in st.session_state:
     st.session_state.reconciliation_results = None
 if 'mapping_presets' not in st.session_state:
     st.session_state.mapping_presets = {}
+    load_default_preset()  # Load default preset when initializing mapping_presets
 if 'current_preset_name' not in st.session_state:
     st.session_state.current_preset_name = ""
 # New session state variables for aggregation
@@ -341,6 +362,10 @@ def column_mapping_tab():
         st.success("Reconciliation completed! View results in the Reconciliation Results tab")
 
 def reconciliation_results_tab():
+    """Display reconciliation results and provide export options."""
+    import io
+    import zipfile
+    
     st.header("Reconciliation Results")
     
     if st.session_state.reconciliation_results is None:
@@ -385,17 +410,156 @@ def reconciliation_results_tab():
     # Export options
     st.subheader("Export Results")
     
-    if st.button("Export Results to CSV"):
-        # Create a directory for exports if it doesn't exist
-        if not os.path.exists("exports"):
-            os.makedirs("exports")
+    # Add Excel download option
+    if (not results["mismatched_data"].empty or 
+        not results["only_in_file1_data"].empty or 
+        not results["only_in_file2_data"].empty):
         
-        # Export all result dataframes
-        results["mismatched_data"].to_csv("exports/mismatched_records.csv", index=False)
-        results["only_in_file1_data"].to_csv("exports/only_in_file1.csv", index=False)
-        results["only_in_file2_data"].to_csv("exports/only_in_file2.csv", index=False)
+        # Create an Excel file in memory
+        output = io.BytesIO()
+        current_time = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
         
-        st.success("Results exported to 'exports' directory")
+        # Create Excel writer object
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Write summary sheet
+            summary_data = pd.DataFrame([{
+                'Metric': 'Matched Records',
+                'Count': results["stats"]["matched"]
+            }, {
+                'Metric': 'Mismatched Records',
+                'Count': results["stats"]["mismatched"]
+            }, {
+                'Metric': 'Records Only in File 1',
+                'Count': results["stats"]["only_in_file1"]
+            }, {
+                'Metric': 'Records Only in File 2',
+                'Count': results["stats"]["only_in_file2"]
+            }])
+            summary_data.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Write mismatched records
+            if not results["mismatched_data"].empty:
+                results["mismatched_data"].to_excel(writer, sheet_name='Mismatched Records', index=False)
+            
+            # Write records only in File 1
+            if not results["only_in_file1_data"].empty:
+                results["only_in_file1_data"].to_excel(writer, sheet_name='Only in File 1', index=False)
+            
+            # Write records only in File 2
+            if not results["only_in_file2_data"].empty:
+                results["only_in_file2_data"].to_excel(writer, sheet_name='Only in File 2', index=False)
+        
+        # Get the Excel file data
+        excel_data = output.getvalue()
+        
+        # Add download button for Excel file
+        st.download_button(
+            label="📊 Download Complete Report (Excel)",
+            data=excel_data,
+            file_name=f"reconciliation_report_{current_time}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="Download all reconciliation results in a single Excel file with multiple sheets"
+        )
+        
+        st.markdown("---")
+        st.write("Download individual results as CSV:")
+        
+        # Create download buttons for individual CSV files
+        export_col1, export_col2, export_col3 = st.columns(3)
+        
+        with export_col1:
+            # Export mismatched records
+            if not results["mismatched_data"].empty:
+                csv_mismatched = results["mismatched_data"].to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Mismatched Records",
+                    data=csv_mismatched,
+                    file_name=f"mismatched_records_{current_time}.csv",
+                    mime="text/csv",
+                    help="Download records that exist in both files but have differences"
+                )
+            else:
+                st.info("No mismatched records to export")
+        
+        with export_col2:
+            # Export records only in File 1
+            if not results["only_in_file1_data"].empty:
+                csv_only_file1 = results["only_in_file1_data"].to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Records Only in File 1",
+                    data=csv_only_file1,
+                    file_name=f"only_in_file1_{current_time}.csv",
+                    mime="text/csv",
+                    help="Download records that exist only in File 1"
+                )
+            else:
+                st.info("No records exclusive to File 1 to export")
+        
+        with export_col3:
+            # Export records only in File 2
+            if not results["only_in_file2_data"].empty:
+                csv_only_file2 = results["only_in_file2_data"].to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download Records Only in File 2",
+                    data=csv_only_file2,
+                    file_name=f"only_in_file2_{current_time}.csv",
+                    mime="text/csv",
+                    help="Download records that exist only in File 2"
+                )
+            else:
+                st.info("No records exclusive to File 2 to export")
+    
+    # Option to download all results in a single action
+    if (not results["mismatched_data"].empty or 
+        not results["only_in_file1_data"].empty or 
+        not results["only_in_file2_data"].empty):
+        
+        st.markdown("---")
+        
+        # Create a comprehensive report with all results
+        with st.expander("Download Complete Reconciliation Report"):
+            st.write("This will download all reconciliation results as separate CSV files in a zip archive.")
+            
+            import io
+            import zipfile
+            
+            # Create a BytesIO object to store the zip file
+            zip_buffer = io.BytesIO()
+            
+            # Create a ZipFile object with the BytesIO object as the file
+            with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+                # Add each dataframe as a CSV file to the zip archive
+                if not results["mismatched_data"].empty:
+                    zip_file.writestr('mismatched_records.csv', results["mismatched_data"].to_csv(index=False))
+                
+                if not results["only_in_file1_data"].empty:
+                    zip_file.writestr('only_in_file1.csv', results["only_in_file1_data"].to_csv(index=False))
+                
+                if not results["only_in_file2_data"].empty:
+                    zip_file.writestr('only_in_file2.csv', results["only_in_file2_data"].to_csv(index=False))
+                
+                # Add a summary report
+                summary = f"""Reconciliation Summary
+Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Statistics:
+- Matched Records: {results["stats"]["matched"]}
+- Mismatched Records: {results["stats"]["mismatched"]}
+- Only in File 1: {results["stats"]["only_in_file1"]}
+- Only in File 2: {results["stats"]["only_in_file2"]}
+"""
+                zip_file.writestr('summary.txt', summary)
+            
+            # Reset the buffer's position to the beginning
+            zip_buffer.seek(0)
+            
+            # Create the download button for the zip file
+            st.download_button(
+                label="Download Complete Report",
+                data=zip_buffer.getvalue(),
+                file_name="reconciliation_report.zip",
+                mime="application/zip"
+            )
 
 def export_preset_to_csv(preset_name):
     """
@@ -428,34 +592,48 @@ def export_preset_to_csv(preset_name):
 
 def import_preset_from_csv(file):
     """
-    Import column mappings and key columns from a CSV file.
+    Import column mappings, key columns, and aggregation settings from a CSV file.
     
     Args:
         file: File object from st.file_uploader
         
     Returns:
-        dict: Dictionary with column_mappings and key_columns
+        dict: Dictionary with column_mappings, key_columns, and aggregation settings
     """
     # Read the CSV file
     df = pd.read_csv(file)
     
-    # Extract mappings and key columns
+    # Extract mappings and settings
     column_mappings = {}
     key_columns = {}
+    agg_columns = []
+    agg_functions = {}
     
     for _, row in df.iterrows():
         file1_col = row["file1_column"]
         file2_col = row["file2_column"]
         is_key = row["is_key_column"]
         
+        # Extract column mappings
         column_mappings[file1_col] = file2_col
         
+        # Extract key columns
         if is_key:
             key_columns[file1_col] = file2_col
+            
+        # Extract aggregation settings if they exist
+        if "use_for_aggregation" in row and "aggregation_function" in row:
+            if row["use_for_aggregation"]:
+                agg_columns.append(file1_col)
+            if pd.notna(row["aggregation_function"]):
+                agg_functions[file1_col] = row["aggregation_function"]
     
     return {
         "column_mappings": column_mappings,
-        "key_columns": key_columns
+        "key_columns": key_columns,
+        "agg_columns": agg_columns,
+        "agg_functions": agg_functions,
+        "use_aggregation": bool(agg_functions)
     }
 
 if __name__ == "__main__":

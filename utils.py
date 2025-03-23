@@ -31,36 +31,33 @@ def perform_reconciliation(df1, df2, column_mappings, key_columns, use_aggregati
     
     # Create a subset of df2 with only mapped columns, renamed to match df1
     df2_mapped = pd.DataFrame()
-    reverse_mapping = {}
     
     for col1, col2 in column_mappings.items():
-        df2_mapped[col1] = df2_copy[col2]
-        reverse_mapping[col1] = col2
+        if col2 in df2_copy.columns:
+            df2_mapped[col1] = df2_copy[col2]
     
-    # Create key for matching
-    if not key_columns:
+    # Add unique identifiers to keep track of records
+    df1_copy['_rec_id_1'] = range(len(df1_copy))
+    df2_mapped['_rec_id_2'] = range(len(df2_copy))
+    
+    # Get the key columns from File 1 and their mapped equivalents in File 2
+    key_cols_file1 = list(key_columns.keys())
+    
+    # Create composite keys for matching
+    if key_cols_file1:
+        df1_copy['_composite_key'] = create_composite_key(df1_copy, key_cols_file1)
+        df2_mapped['_composite_key'] = create_composite_key(df2_mapped, key_cols_file1)
+    else:
         raise ValueError("No key columns provided for matching")
     
-    # Add a unique identifier to keep track of records
-    df1_copy['_rec_id_1'] = range(len(df1_copy))
-    df2_mapped['_rec_id_2'] = range(len(df2_mapped))
-    
-    # Create a composite key for matching
-    df1_copy['_composite_key'] = create_composite_key(df1_copy, list(key_columns.keys()))
-    df2_mapped['_composite_key'] = create_composite_key(df2_mapped, list(key_columns.keys()))
-    
-    # Find matches, mismatches, and unmatched records
-    # 1. Matched records (records with same key in both dataframes)
+    # Find matches, mismatches, and unmatched records using merge
     merged = pd.merge(
-        df1_copy, 
-        df2_mapped, 
-        on='_composite_key', 
-        how='outer', 
-        suffixes=('_file1', '_file2'),
+        df1_copy, df2_mapped, on='_composite_key', 
+        how='outer', suffixes=('_file1', '_file2'), 
         indicator=True
     )
     
-    # Separate into matched, only in file1, and only in file2
+    # Split into matched vs. unmatched
     matched = merged[merged['_merge'] == 'both']
     only_in_file1 = merged[merged['_merge'] == 'left_only']
     only_in_file2 = merged[merged['_merge'] == 'right_only']
@@ -68,13 +65,17 @@ def perform_reconciliation(df1, df2, column_mappings, key_columns, use_aggregati
     # Find mismatches in matched records
     mismatched_data = identify_mismatches(matched, column_mappings.keys())
     
-    # Prepare data for return
-    only_in_file1_data = df1.loc[only_in_file1['_rec_id_1'].values].reset_index(drop=True) if not only_in_file1.empty else pd.DataFrame()
+    # Get the original records for those only in File 1
+    if not only_in_file1.empty:
+        rec_ids_file1 = only_in_file1['_rec_id_1'].values
+        only_in_file1_data = df1.iloc[rec_ids_file1].reset_index(drop=True)
+    else:
+        only_in_file1_data = pd.DataFrame()
     
-    # For only in file2, we need to map back to original column names
+    # Get the original records for those only in File 2
     if not only_in_file2.empty:
-        only_in_file2_indices = only_in_file2['_rec_id_2'].values
-        only_in_file2_data = df2.iloc[only_in_file2_indices].reset_index(drop=True)
+        rec_ids_file2 = only_in_file2['_rec_id_2'].values
+        only_in_file2_data = df2.iloc[rec_ids_file2].reset_index(drop=True)
     else:
         only_in_file2_data = pd.DataFrame()
     
@@ -178,8 +179,13 @@ def identify_mismatches(matched_df, columns_to_compare):
     Returns:
         pd.DataFrame: DataFrame with mismatched records and highlighted differences
     """
-    mismatch_rows = []
+    # Create a copy of matched_df to add difference columns
+    result_df = matched_df.copy()
     
+    # Track which rows have at least one mismatch
+    has_mismatch = pd.Series(False, index=matched_df.index)
+    
+    # For each column, check for mismatches and add difference column
     for col in columns_to_compare:
         col_file1 = f"{col}_file1"
         col_file2 = f"{col}_file2"
@@ -193,28 +199,31 @@ def identify_mismatches(matched_df, columns_to_compare):
         mismatch_mask = (matched_df[col_file1].fillna('').astype(str) != 
                          matched_df[col_file2].fillna('').astype(str))
         
+        # Update the overall mismatch tracker
+        has_mismatch = has_mismatch | mismatch_mask
+        
+        # Create a new column to show the difference for mismatched values
+        result_df[f"{col}_diff"] = None
         if mismatch_mask.any():
-            mismatched_subset = matched_df[mismatch_mask].copy()
-            
-            # Create a new column to show the difference
-            mismatched_subset[f"{col}_diff"] = (
-                "File1: " + mismatched_subset[col_file1].fillna('').astype(str) + 
-                " | File2: " + mismatched_subset[col_file2].fillna('').astype(str)
+            result_df.loc[mismatch_mask, f"{col}_diff"] = (
+                "File1: " + matched_df.loc[mismatch_mask, col_file1].fillna('').astype(str) + 
+                " | File2: " + matched_df.loc[mismatch_mask, col_file2].fillna('').astype(str)
             )
-            
-            # Keep only necessary columns
-            cols_to_keep = ['_composite_key']
-            for c in columns_to_compare:
-                if c.startswith('_'):
-                    continue
-                cols_to_keep.extend([f"{c}_file1", f"{c}_file2"])
-                if c == col:
-                    cols_to_keep.append(f"{c}_diff")
-            
-            mismatched_subset = mismatched_subset[cols_to_keep]
-            mismatch_rows.append(mismatched_subset)
     
-    if not mismatch_rows:
+    # Filter to only rows with at least one mismatch
+    if not has_mismatch.any():
         return pd.DataFrame()
     
-    return pd.concat(mismatch_rows, ignore_index=True).drop_duplicates()
+    mismatched_result = result_df[has_mismatch].copy()
+    
+    # Keep only necessary columns
+    cols_to_keep = ['_composite_key'] 
+    for col in columns_to_compare:
+        if col.startswith('_'):
+            continue
+        cols_to_keep.extend([f"{col}_file1", f"{col}_file2", f"{col}_diff"])
+    
+    # Filter to columns that exist (some diff columns might not exist if no mismatches)
+    cols_to_keep = [col for col in cols_to_keep if col in mismatched_result.columns]
+    
+    return mismatched_result[cols_to_keep]
