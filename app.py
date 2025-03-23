@@ -7,6 +7,52 @@ from utils import perform_reconciliation
 
 st.set_page_config(page_title="CSV Reconciliation Tool", layout="wide")
 
+def import_preset_from_csv(file):
+    """
+    Import column mappings, key columns, and aggregation settings from a CSV file.
+    
+    Args:
+        file: File object from st.file_uploader or file handle
+        
+    Returns:
+        dict: Dictionary with column_mappings, key_columns, and aggregation settings
+    """
+    # Read the CSV file
+    df = pd.read_csv(file)
+    
+    # Extract mappings and settings
+    column_mappings = {}
+    key_columns = {}
+    agg_columns = []
+    agg_functions = {}
+    
+    for _, row in df.iterrows():
+        file1_col = row["file1_column"]
+        file2_col = row["file2_column"]
+        is_key = row["is_key_column"]
+        
+        # Extract column mappings
+        column_mappings[file1_col] = file2_col
+        
+        # Extract key columns
+        if is_key:
+            key_columns[file1_col] = file2_col
+            
+        # Extract aggregation settings if they exist
+        if "use_for_aggregation" in row and "aggregation_function" in row:
+            if row["use_for_aggregation"]:
+                agg_columns.append(file1_col)
+            if pd.notna(row["aggregation_function"]):
+                agg_functions[file1_col] = row["aggregation_function"]
+    
+    return {
+        "column_mappings": column_mappings,
+        "key_columns": key_columns,
+        "agg_columns": agg_columns,
+        "agg_functions": agg_functions,
+        "use_aggregation": bool(agg_functions)
+    }
+
 def load_default_preset():
     """Load the default transaction mapping preset if it exists."""
     preset_path = "presets/transaction_mapping_preset.csv"
@@ -589,52 +635,6 @@ def export_preset_to_csv(preset_name):
     filepath = f"presets/{preset_name}.csv"
     export_df.to_csv(filepath, index=False)
     return filepath
-
-def import_preset_from_csv(file):
-    """
-    Import column mappings, key columns, and aggregation settings from a CSV file.
-    
-    Args:
-        file: File object from st.file_uploader
-        
-    Returns:
-        dict: Dictionary with column_mappings, key_columns, and aggregation settings
-    """
-    # Read the CSV file
-    df = pd.read_csv(file)
-    
-    # Extract mappings and settings
-    column_mappings = {}
-    key_columns = {}
-    agg_columns = []
-    agg_functions = {}
-    
-    for _, row in df.iterrows():
-        file1_col = row["file1_column"]
-        file2_col = row["file2_column"]
-        is_key = row["is_key_column"]
-        
-        # Extract column mappings
-        column_mappings[file1_col] = file2_col
-        
-        # Extract key columns
-        if is_key:
-            key_columns[file1_col] = file2_col
-            
-        # Extract aggregation settings if they exist
-        if "use_for_aggregation" in row and "aggregation_function" in row:
-            if row["use_for_aggregation"]:
-                agg_columns.append(file1_col)
-            if pd.notna(row["aggregation_function"]):
-                agg_functions[file1_col] = row["aggregation_function"]
-    
-    return {
-        "column_mappings": column_mappings,
-        "key_columns": key_columns,
-        "agg_columns": agg_columns,
-        "agg_functions": agg_functions,
-        "use_aggregation": bool(agg_functions)
-    }
 
 if __name__ == "__main__":
     main()
